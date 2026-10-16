@@ -308,7 +308,6 @@ def _write_output(output: Path, text: str) -> None:
 
 def convert_command(args) -> int:
     """Handle the default conversion path, with format auto-detection."""
-    converter = Converter()
     input_path: Path = args.input_file
 
     if not input_path.exists():
@@ -335,6 +334,8 @@ def convert_command(args) -> int:
     # CSCSS syntax is validated by the real parse inside _run_conversion
     # itself (caught below) rather than a separate throwaway parse here —
     # a cscss source used to get lexed and parsed twice unconditionally.
+    # SLD and MapLibre have no include: merge the included files for them.
+    converter = Converter(inline_includes=to_format not in ("csjson", "cscss"))
     if from_format == "csjson":
         problem = _validate_csjson_instance(input_path)
         if problem is not None:
@@ -398,7 +399,10 @@ def _run_conversion(
     dst_codec = get_codec(to_format)
     if not (src_codec and dst_codec and src_codec.reader and dst_codec.writer):
         raise _UnsupportedConversion
-    style = src_codec.read(args.input_file)
+    if from_format == "cscss":  # honour the converter's include handling
+        style = converter.parser.parse_file_to_pydantic(args.input_file)
+    else:
+        style = src_codec.read(args.input_file)
     result = dst_codec.write(style)
     if isinstance(result, dict):
         return json.dumps(result, indent=2, ensure_ascii=False)
