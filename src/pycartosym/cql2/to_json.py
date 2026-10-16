@@ -24,6 +24,17 @@ __all__ = [
 _COMPARISON_OPERATORS = [">=", "<=", "<>", "!=", "=", ">", "<"]
 
 
+class _StringLiteral(str):
+    """A CQL2 character literal (``'sl'``), as opposed to an identifier.
+
+    Both reach :func:`post_process_selector` as plain ``str``, which then
+    turns a bare word into a property reference. This marker keeps a quoted
+    literal a literal.
+    """
+
+    __slots__ = ()
+
+
 def split_on_comparison_operator(
     text: str, *, quoted_guard: bool = True
 ) -> tuple[str, str, str] | None:
@@ -81,7 +92,9 @@ def post_process_selector(selector: Any) -> Any:
             ]
             for i, arg in enumerate(selector["args"]):
                 # Convert string arguments to property references in comparisons
-                if isinstance(arg, str):
+                if isinstance(arg, _StringLiteral):
+                    processed_args.append(str(arg))
+                elif isinstance(arg, str):
                     # In a comparison, right-hand args (index > 0) are VALUE
                     # literals (from CHARACTER_LITERALs like 'parking') – keep
                     # them as plain strings.
@@ -218,7 +231,12 @@ def expression_to_json(expression: Any) -> Any:
         return {}
 
     # NULL literal -> JSON null (checked before the falsy guard below).
-    from .model import NullLiteral
+    from .model import (
+        ArrayExpression,
+        ConditionalExpression,
+        NullLiteral,
+        StringExpression,
+    )
 
     if isinstance(expression, NullLiteral):
         return None
@@ -237,6 +255,19 @@ def expression_to_json(expression: Any) -> Any:
 
         rule_name = CartoSymCSSGrammar.ruleNames[expression.getRuleIndex()]
         return convert_antlr_expression(expression, rule_name)
+
+    # Array literal -> JSON array; `c ? a : b` -> the schema's "?:" operator.
+    if isinstance(expression, ArrayExpression):
+        return [expression_to_json(item) for item in expression.elements]
+    if isinstance(expression, ConditionalExpression):
+        return {
+            "op": "?:",
+            "args": [
+                expression_to_json(expression.condition),
+                expression_to_json(expression.true_value),
+                expression_to_json(expression.false_value),
+            ],
+        }
 
     # Handle UnaryOperationExpression (`not <expr>`) — check before the
     # binary branch (unary has `operator` + `operand`, no left/right).
@@ -263,7 +294,9 @@ def expression_to_json(expression: Any) -> Any:
 
         # Map operator enum to string
         op_str = str(expression.operator)
-        if "AND" in op_str:
+        if getattr(expression.operator, "value", expression.operator) == "**":
+            op = "^"  # CQL2-JSON / schema power operator
+        elif "AND" in op_str:
             op = "and"
         elif "OR" in op_str:
             op = "or"
@@ -370,6 +403,9 @@ def expression_to_json(expression: Any) -> Any:
             "op": func_name,
             "args": [expression_to_json(arg) for arg in expression.arguments],
         }
+
+    if isinstance(expression, StringExpression):
+        return _StringLiteral(expression.value)
 
     # Handle IdentifierExpression (simple properties)
     if hasattr(expression, "name"):
